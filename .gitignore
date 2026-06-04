@@ -1,0 +1,22 @@
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Google credentials
+token_google.json
+credentials_oauth.json
+
+# Telegram session files
+*.session
+*.session-journal
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local temp/output files
+*.csv
+*.xlsx
+*.pdf
+screenshots_receptor/
+pdf_reports/
+local_temp_test/
