@@ -32,7 +32,7 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 st.set_page_config(
     page_title="Telegram Scraper",
-    page_icon="📄",
+    page_icon="🤓",
     layout="wide"
 )
 
@@ -138,17 +138,6 @@ def get_google_services():
 # DRIVE HELPERS
 # =========================================================
 
-def list_drive_folder_items(drive_service, folder_id):
-    query = f"'{folder_id}' in parents and trashed = false"
-
-    results = drive_service.files().list(
-        q=query,
-        fields="files(id, name, mimeType, webViewLink)"
-    ).execute()
-
-    return results.get("files", [])
-
-
 def get_child_folder_id(drive_service, parent_folder_id, folder_name):
     query = (
         f"name = '{folder_name}' "
@@ -166,7 +155,7 @@ def get_child_folder_id(drive_service, parent_folder_id, folder_name):
 
     if not folders:
         raise FileNotFoundError(
-            f"No encontré la carpeta '{folder_name}' dentro de la carpeta raíz de Drive."
+            f"No encontré la carpeta interna requerida: {folder_name}."
         )
 
     return folders[0]["id"]
@@ -418,7 +407,7 @@ async def extraer_telegram_a_drive(
                         mimetype="image/jpeg"
                     )
                 except Exception as e:
-                    logs.append(f"[ERROR] No se pudo subir a Drive msg_id={msg.id}: {e}")
+                    logs.append(f"[ERROR] No se pudo guardar msg_id={msg.id}: {e}")
                     continue
 
             created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -560,7 +549,7 @@ def draw_half(cnv, row, x0, y_top, width, local_images_dir):
             cnv.drawString(
                 x0 + 4,
                 img_top - 14,
-                f"Error al cargar: {os.path.basename(str(img_path))} ({e})"
+                f"Error al cargar imagen ({e})"
             )
     else:
         cnv.setStrokeColorRGB(1, 0.2, 0.2)
@@ -637,7 +626,7 @@ def download_images_for_rows(drive_service, rows, local_images_dir):
         drive_file_id = row.get("drive_file_id")
 
         if not drive_file_id or pd.isna(drive_file_id):
-            logs.append(f"[WARN] msg_id={msg_id} no tiene drive_file_id.")
+            logs.append(f"[WARN] msg_id={msg_id} no tiene archivo asociado.")
             continue
 
         local_path = os.path.join(local_images_dir, f"{msg_id}.jpg")
@@ -652,7 +641,7 @@ def download_images_for_rows(drive_service, rows, local_images_dir):
                 local_file_path=local_path
             )
         except Exception as e:
-            logs.append(f"[ERROR] No se pudo descargar imagen msg_id={msg_id}: {e}")
+            logs.append(f"[ERROR] No se pudo recuperar imagen msg_id={msg_id}: {e}")
 
     return logs
 
@@ -736,9 +725,9 @@ def generate_pdfs_and_upload_to_drive(
         )
 
         if deleted:
-            logs.append(f"[INFO] PDF incompleto eliminado de Drive: {start_info['deleted_incomplete_pdf_name']}")
+            logs.append(f"[INFO] PDF incompleto anterior reemplazado: {start_info['deleted_incomplete_pdf_name']}")
         else:
-            logs.append(f"[WARN] No se encontró PDF incompleto en Drive: {start_info['deleted_incomplete_pdf_name']}")
+            logs.append(f"[WARN] No se encontró PDF incompleto anterior: {start_info['deleted_incomplete_pdf_name']}")
 
     start_idx = start_info["start_idx"]
 
@@ -799,7 +788,7 @@ def generate_pdfs_and_upload_to_drive(
 
             uploaded_pdfs.append(uploaded_pdf)
 
-            logs.append(f"[OK] PDF generado y subido: {pdf_name}")
+            logs.append(f"[OK] PDF generado: {pdf_name}")
 
     return uploaded_pdfs, logs
 
@@ -823,7 +812,7 @@ if "show_extraction_success" not in st.session_state:
 # =========================================================
 
 st.title("Telegram Scraper")
-st.caption("Extracción de imágenes de Telegram, DB en Google Sheets y PDFs en Drive.")
+st.caption("Extracción de imágenes de Telegram, actualización de DB y generación de PDFs.")
 
 st.divider()
 
@@ -843,7 +832,7 @@ try:
         PDF_REPORTS_FOLDER_NAME
     )
 
-    st.success("Conexión a Google exitosa.")
+    st.success("Conexión lista.")
 
     df_messages = get_messages_df(sh)
 
@@ -922,51 +911,18 @@ try:
     )
 
     # =====================================================
-    # ESTADO GENERAL
+    # BASE DE DATOS
     # =====================================================
 
-    col1, col2 = st.columns(2)
+    st.subheader("Base de datos")
 
-    with col1:
-        st.subheader("Google Sheets")
+    st.metric("Total registros en DB", len(df_messages))
 
-        st.write("Archivo conectado:")
-        st.code(sh.title)
-
-        worksheets = [ws.title for ws in sh.worksheets()]
-        st.write("Hojas disponibles:")
-        st.write(worksheets)
-
-        st.metric("Total registros en DB", len(df_messages))
-
-        if not df_messages.empty:
-            st.write("Últimos registros:")
-            st.dataframe(df_messages.tail(20), use_container_width=True)
-        else:
-            st.info("La hoja messages está vacía.")
-
-    with col2:
-        st.subheader("Google Drive")
-
-        folder = drive_service.files().get(
-            fileId=DRIVE_ROOT_FOLDER_ID,
-            fields="id, name, mimeType"
-        ).execute()
-
-        st.write("Carpeta raíz conectada:")
-        st.code(folder["name"])
-
-        items = list_drive_folder_items(drive_service, DRIVE_ROOT_FOLDER_ID)
-        df_items = pd.DataFrame(items)
-
-        st.write("Elementos dentro de la carpeta:")
-        st.dataframe(df_items, use_container_width=True)
-
-        st.write("Carpeta de imágenes:")
-        st.code(f"{SCREENSHOTS_FOLDER_NAME} | {screenshots_folder_id}")
-
-        st.write("Carpeta de PDFs:")
-        st.code(f"{PDF_REPORTS_FOLDER_NAME} | {pdf_reports_folder_id}")
+    if not df_messages.empty:
+        st.write("Últimos registros:")
+        st.dataframe(df_messages.tail(20), use_container_width=True)
+    else:
+        st.info("La hoja messages está vacía.")
 
     st.divider()
 
@@ -978,14 +934,14 @@ try:
 
     st.write(
         "Este proceso descargará fotos nuevas desde Telegram, "
-        "las subirá a Drive y guardará la metadata en Google Sheets."
+        "actualizará la DB y guardará la metadata correspondiente."
     )
 
     if st.button("Extraer imágenes nuevas", type="primary"):
         if not api_hash:
             st.error("Primero configura TELEGRAM_API_HASH en secrets o pégalo manualmente.")
         else:
-            with st.spinner("Extrayendo imágenes de Telegram y subiendo a Drive..."):
+            with st.spinner("Extrayendo imágenes de Telegram..."):
                 ids_existentes = set()
 
                 if not df_messages.empty and "id_mensaje" in df_messages.columns:
@@ -1024,7 +980,7 @@ try:
 
         if count and count > 0:
             st.success(
-                f"{count} registros nuevos guardados en Google Sheets. "
+                f"{count} registros nuevos guardados. "
                 "La DB ya fue recargada automáticamente."
             )
         else:
@@ -1047,7 +1003,7 @@ try:
 
     st.write(
         "Este proceso toma todas las imágenes nuevas desde LAST_OLD_ID, "
-        "genera PDFs por chunks de 200 y los sube a Drive/pdf_reports."
+        "genera PDFs por chunks de 200 y los guarda automáticamente."
     )
 
     col_pdf_1, col_pdf_2, col_pdf_3 = st.columns(3)
@@ -1067,11 +1023,11 @@ try:
 
         st.metric("Imágenes nuevas directas", new_rows_count)
 
-    if st.button("Generar PDFs y subir a Drive", type="primary"):
+    if st.button("Generar PDFs", type="primary"):
         if df_messages.empty:
             st.error("La DB está vacía. Primero extrae imágenes.")
         else:
-            with st.spinner("Generando PDFs y subiendo a Drive..."):
+            with st.spinner("Generando PDFs..."):
                 uploaded_pdfs, pdf_logs = generate_pdfs_and_upload_to_drive(
                     df_messages=df_messages,
                     last_old_id=int(last_old_id_pdf),
@@ -1081,16 +1037,13 @@ try:
                 )
 
             if uploaded_pdfs:
-                st.success(f"{len(uploaded_pdfs)} PDFs generados y subidos a Drive.")
+                pdf_names = [pdf["name"] for pdf in uploaded_pdfs]
 
-                df_pdfs = pd.DataFrame(uploaded_pdfs)
+                st.success(f"{len(uploaded_pdfs)} PDF(s) generado(s) correctamente.")
 
                 st.write("PDFs generados:")
-                st.dataframe(df_pdfs, use_container_width=True)
-
-                st.write("Links:")
-                for pdf in uploaded_pdfs:
-                    st.markdown(f"- [{pdf['name']}]({pdf.get('webViewLink', '')})")
+                for name in pdf_names:
+                    st.write(f"- {name}")
             else:
                 st.info("No se generaron PDFs nuevos.")
 
