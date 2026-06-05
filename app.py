@@ -32,7 +32,6 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 st.set_page_config(
     page_title="Telegram Scraper",
-    page_icon="📄",
     layout="wide"
 )
 
@@ -436,7 +435,7 @@ async def extraer_telegram_a_drive(
     screenshots_folder_id,
     ids_existentes,
     min_id=None,
-    max_to_process=5
+    max_to_process=100000
 ):
     registros_nuevos = []
     logs = []
@@ -971,7 +970,7 @@ try:
         "Máximo de imágenes a procesar",
         value=5,
         min_value=1,
-        max_value=1000,
+        max_value=100000,
         step=1
     )
 
