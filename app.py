@@ -32,7 +32,7 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 st.set_page_config(
     page_title="Telegram Scraper",
-    page_icon="🤓",
+    page_icon="📄",
     layout="wide"
 )
 
@@ -233,6 +233,92 @@ def delete_drive_file_if_exists(drive_service, parent_folder_id, file_name):
         return True
 
     return False
+
+
+def parse_pdf_range(file_name):
+    """
+    Convierte nombres tipo '99605-100266.pdf' en (99605, 100266).
+    Si no cumple el formato, regresa None.
+    """
+    match = re.match(r"^(\d+)-(\d+)\.pdf$", str(file_name).strip())
+
+    if not match:
+        return None
+
+    start_id = int(match.group(1))
+    end_id = int(match.group(2))
+
+    return start_id, end_id
+
+
+def ranges_overlap(a_start, a_end, b_start, b_end):
+    """
+    Evalúa si dos rangos [a_start, a_end] y [b_start, b_end] se empalman.
+    """
+    return a_start <= b_end and b_start <= a_end
+
+
+def list_pdf_files_in_folder(drive_service, parent_folder_id):
+    """
+    Lista PDFs dentro de una carpeta de Drive.
+    Maneja paginación por si hay muchos archivos.
+    """
+    files = []
+    page_token = None
+
+    while True:
+        query = (
+            f"'{parent_folder_id}' in parents "
+            f"and mimeType = 'application/pdf' "
+            f"and trashed = false"
+        )
+
+        response = drive_service.files().list(
+            q=query,
+            fields="nextPageToken, files(id, name, webViewLink)",
+            pageToken=page_token
+        ).execute()
+
+        files.extend(response.get("files", []))
+        page_token = response.get("nextPageToken")
+
+        if not page_token:
+            break
+
+    return files
+
+
+def delete_overlapping_pdfs(
+    drive_service,
+    parent_folder_id,
+    regen_start_id,
+    regen_end_id
+):
+    """
+    Borra PDFs existentes cuyo rango de IDs se empalme con el rango que se va a regenerar.
+    """
+    deleted_files = []
+    pdf_files = list_pdf_files_in_folder(drive_service, parent_folder_id)
+
+    for file in pdf_files:
+        file_name = file.get("name", "")
+        parsed_range = parse_pdf_range(file_name)
+
+        if not parsed_range:
+            continue
+
+        pdf_start_id, pdf_end_id = parsed_range
+
+        if ranges_overlap(
+            pdf_start_id,
+            pdf_end_id,
+            regen_start_id,
+            regen_end_id
+        ):
+            drive_service.files().delete(fileId=file["id"]).execute()
+            deleted_files.append(file_name)
+
+    return deleted_files
 
 
 # =========================================================
@@ -588,7 +674,6 @@ def prepare_pdf_start_index(df_src, last_old_id, chunk_size):
     info = {
         "n_prev": n_prev,
         "rem": rem,
-        "deleted_incomplete_pdf_name": None,
         "start_idx": None,
         "message": None
     }
@@ -602,12 +687,9 @@ def prepare_pdf_start_index(df_src, last_old_id, chunk_size):
     else:
         old_start_idx = n_prev - rem
         old_start_id = int(df_src.iloc[old_start_idx]["id_mensaje"])
-        old_end_id = int(df_src.iloc[n_prev - 1]["id_mensaje"])
-        old_pdf_name = f"{old_start_id}-{old_end_id}.pdf"
 
         start_idx = old_start_idx
 
-        info["deleted_incomplete_pdf_name"] = old_pdf_name
         info["message"] = (
             f"Chunk incompleto detectado. Se regenerará desde idx {start_idx}, "
             f"id inicial {old_start_id}."
@@ -717,18 +799,6 @@ def generate_pdfs_and_upload_to_drive(
     logs.append(f"[INFO] Registros previos hasta LAST_OLD_ID: {start_info['n_prev']}")
     logs.append(f"[INFO] Residuo chunk previo: {start_info['rem']}")
 
-    if start_info["deleted_incomplete_pdf_name"]:
-        deleted = delete_drive_file_if_exists(
-            drive_service=drive_service,
-            parent_folder_id=pdf_reports_folder_id,
-            file_name=start_info["deleted_incomplete_pdf_name"]
-        )
-
-        if deleted:
-            logs.append(f"[INFO] PDF incompleto anterior reemplazado: {start_info['deleted_incomplete_pdf_name']}")
-        else:
-            logs.append(f"[WARN] No se encontró PDF incompleto anterior: {start_info['deleted_incomplete_pdf_name']}")
-
     start_idx = start_info["start_idx"]
 
     rows_all = df_src.to_dict(orient="records")
@@ -741,8 +811,26 @@ def generate_pdfs_and_upload_to_drive(
     total_tail = len(rows_tail)
     num_pdfs = math.ceil(total_tail / chunk_size)
 
+    regen_start_id = int(rows_tail[0]["id_mensaje"])
+    regen_end_id = int(rows_tail[-1]["id_mensaje"])
+
     logs.append(f"[INFO] Imágenes a procesar desde idx {start_idx}: {total_tail}")
+    logs.append(f"[INFO] Rango a regenerar: {regen_start_id}-{regen_end_id}")
     logs.append(f"[INFO] PDFs a generar: {num_pdfs}")
+
+    deleted_overlapping = delete_overlapping_pdfs(
+        drive_service=drive_service,
+        parent_folder_id=pdf_reports_folder_id,
+        regen_start_id=regen_start_id,
+        regen_end_id=regen_end_id
+    )
+
+    if deleted_overlapping:
+        logs.append("[INFO] PDFs anteriores empalmados eliminados:")
+        for deleted_name in deleted_overlapping:
+            logs.append(f"       - {deleted_name}")
+    else:
+        logs.append("[INFO] No se encontraron PDFs anteriores empalmados para eliminar.")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         local_images_dir = os.path.join(tmpdir, "images")
@@ -770,12 +858,6 @@ def generate_pdfs_and_upload_to_drive(
                 chunk=chunk,
                 output_pdf_path=local_pdf_path,
                 local_images_dir=local_images_dir
-            )
-
-            delete_drive_file_if_exists(
-                drive_service=drive_service,
-                parent_folder_id=pdf_reports_folder_id,
-                file_name=pdf_name
             )
 
             uploaded_pdf = upload_file_to_drive(
