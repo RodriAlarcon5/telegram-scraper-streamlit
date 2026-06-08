@@ -172,6 +172,43 @@ def execute_drive_request_with_retries(request_factory, max_retries=5):
 
 
 # =========================================================
+# UI HELPERS
+# =========================================================
+
+def escape_html(text):
+    text = str(text or "")
+
+    return (
+        text
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def render_scrollable_logs(container, logs, height=180, max_lines=120):
+    logs_text = "\n".join(logs[-max_lines:]) if logs else "Sin logs todavía."
+    logs_text = escape_html(logs_text)
+
+    container.markdown(
+        f"""
+        <div style="
+            height: {height}px;
+            overflow-y: auto;
+            border: 1px solid rgba(49, 51, 63, 0.2);
+            border-radius: 0.5rem;
+            padding: 0.75rem;
+            background-color: rgba(250, 250, 250, 0.03);
+            font-family: monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+        ">{logs_text}</div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# =========================================================
 # DRIVE HELPERS
 # =========================================================
 
@@ -287,6 +324,12 @@ def delete_drive_file_if_exists(drive_service, parent_folder_id, file_name):
         return True
 
     return False
+
+
+def delete_drive_file_by_id(drive_service, file_id):
+    execute_drive_request_with_retries(
+        lambda: drive_service.files().delete(fileId=file_id)
+    )
 
 
 def parse_pdf_range(file_name):
@@ -542,6 +585,8 @@ async def extraer_telegram_a_drive_streaming(
             stats["estado"] = f"Descargando imagen msg_id={msg.id}..."
             update_ui()
 
+            uploaded = None
+
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_file_path = os.path.join(tmpdir, f"{msg.id}.jpg")
 
@@ -600,7 +645,28 @@ async def extraer_telegram_a_drive_streaming(
                 append_row_with_retries(ws_messages, registro)
             except Exception as e:
                 stats["errores"] += 1
-                add_log(f"[ERROR] Imagen subida, pero no se pudo escribir en DB msg_id={msg.id}: {e}")
+
+                uploaded_file_id = uploaded.get("id") if uploaded else None
+
+                if uploaded_file_id:
+                    try:
+                        delete_drive_file_by_id(drive_service, uploaded_file_id)
+
+                        add_log(
+                            f"[ERROR] Imagen subida, pero falló DB msg_id={msg.id}. "
+                            f"Se eliminó la imagen para evitar archivo huérfano. Error: {e}"
+                        )
+                    except Exception as delete_error:
+                        add_log(
+                            f"[ERROR] Imagen subida, falló DB msg_id={msg.id} "
+                            f"y además no se pudo eliminar la imagen. "
+                            f"Error DB: {e} | Error delete: {delete_error}"
+                        )
+                else:
+                    add_log(
+                        f"[ERROR] No se pudo escribir en DB msg_id={msg.id}: {e}"
+                    )
+
                 update_ui(force=True)
                 continue
 
@@ -1106,7 +1172,12 @@ try:
 
     if not df_messages.empty:
         st.write("Últimos registros:")
-        st.dataframe(df_messages.tail(20), use_container_width=True)
+
+        st.dataframe(
+            df_messages.tail(20),
+            use_container_width=True,
+            height=180
+        )
     else:
         st.info("La hoja messages está vacía.")
 
@@ -1181,11 +1252,11 @@ try:
                 metric_errores.metric("Errores", errores)
                 metric_tiempo.metric("Tiempo min", f"{elapsed_min:.1f}")
 
-                log_box.text_area(
-                    "Logs en vivo",
-                    value="\n".join(logs[-120:]) if logs else "Sin logs todavía.",
+                render_scrollable_logs(
+                    container=log_box,
+                    logs=logs,
                     height=180,
-                    disabled=True
+                    max_lines=120
                 )
 
             with st.spinner("Extrayendo imágenes. No cierres esta pestaña..."):
@@ -1238,11 +1309,11 @@ try:
         if logs:
             st.write("Logs finales:")
 
-            st.text_area(
-                "Últimos logs de extracción",
-                value="\n".join(logs[-120:]),
+            render_scrollable_logs(
+                container=st,
+                logs=logs,
                 height=180,
-                disabled=True
+                max_lines=120
             )
 
     st.divider()
