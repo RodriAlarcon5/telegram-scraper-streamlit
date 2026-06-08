@@ -941,15 +941,41 @@ def generate_pdfs_and_upload_to_drive(
     last_old_id,
     chunk_size,
     drive_service,
-    pdf_reports_folder_id
+    pdf_reports_folder_id,
+    ui_callback=None
 ):
     logs = []
     uploaded_pdfs = []
 
+    stats = {
+        "imagenes_a_procesar": 0,
+        "total_pdfs": 0,
+        "pdfs_generados": 0,
+        "pdf_actual": "-",
+        "estado": "Preparando generación de PDFs...",
+        "inicio": time.time(),
+        "errores": 0
+    }
+
+    def add_log(message):
+        logs.append(message)
+
+    def update_ui(force=False):
+        if ui_callback:
+            ui_callback(stats.copy(), logs.copy(), force=force)
+
+    update_ui(force=True)
+
     df_src = df_messages.copy()
 
     if df_src.empty:
-        return [], ["[INFO] La DB está vacía. No hay PDFs por generar."]
+        add_log("[INFO] La DB está vacía. No hay PDFs por generar.")
+        stats["estado"] = "La DB está vacía."
+        update_ui(force=True)
+        return [], logs
+
+    stats["estado"] = "Limpiando y ordenando registros de la DB..."
+    update_ui(force=True)
 
     df_src["id_mensaje"] = pd.to_numeric(df_src["id_mensaje"], errors="coerce")
     df_src = (
@@ -967,9 +993,9 @@ def generate_pdfs_and_upload_to_drive(
         chunk_size=chunk_size
     )
 
-    logs.append(f"[INFO] {start_info['message']}")
-    logs.append(f"[INFO] Registros previos hasta LAST_OLD_ID: {start_info['n_prev']}")
-    logs.append(f"[INFO] Residuo chunk previo: {start_info['rem']}")
+    add_log(f"[INFO] {start_info['message']}")
+    add_log(f"[INFO] Registros previos hasta LAST_OLD_ID: {start_info['n_prev']}")
+    add_log(f"[INFO] Residuo chunk previo: {start_info['rem']}")
 
     start_idx = start_info["start_idx"]
 
@@ -977,18 +1003,27 @@ def generate_pdfs_and_upload_to_drive(
     total = len(rows_all)
 
     if start_idx >= total:
-        return uploaded_pdfs, logs + ["[INFO] No hay nuevas imágenes para generar PDF."]
+        add_log("[INFO] No hay nuevas imágenes para generar PDF.")
+        stats["estado"] = "No hay nuevas imágenes para generar PDF."
+        update_ui(force=True)
+        return uploaded_pdfs, logs
 
     rows_tail = rows_all[start_idx:]
     total_tail = len(rows_tail)
     num_pdfs = math.ceil(total_tail / chunk_size)
 
+    stats["imagenes_a_procesar"] = total_tail
+    stats["total_pdfs"] = num_pdfs
+
     regen_start_id = int(rows_tail[0]["id_mensaje"])
     regen_end_id = int(rows_tail[-1]["id_mensaje"])
 
-    logs.append(f"[INFO] Imágenes a procesar desde idx {start_idx}: {total_tail}")
-    logs.append(f"[INFO] Rango a regenerar: {regen_start_id}-{regen_end_id}")
-    logs.append(f"[INFO] PDFs a generar: {num_pdfs}")
+    add_log(f"[INFO] Imágenes a procesar desde idx {start_idx}: {total_tail}")
+    add_log(f"[INFO] Rango a regenerar: {regen_start_id}-{regen_end_id}")
+    add_log(f"[INFO] PDFs a generar: {num_pdfs}")
+
+    stats["estado"] = "Eliminando PDFs anteriores empalmados..."
+    update_ui(force=True)
 
     deleted_overlapping = delete_overlapping_pdfs(
         drive_service=drive_service,
@@ -998,11 +1033,13 @@ def generate_pdfs_and_upload_to_drive(
     )
 
     if deleted_overlapping:
-        logs.append("[INFO] PDFs anteriores empalmados eliminados:")
+        add_log("[INFO] PDFs anteriores empalmados eliminados:")
         for deleted_name in deleted_overlapping:
-            logs.append(f"       - {deleted_name}")
+            add_log(f"       - {deleted_name}")
     else:
-        logs.append("[INFO] No se encontraron PDFs anteriores empalmados para eliminar.")
+        add_log("[INFO] No se encontraron PDFs anteriores empalmados para eliminar.")
+
+    update_ui(force=True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         local_images_dir = os.path.join(tmpdir, "images")
@@ -1011,6 +1048,9 @@ def generate_pdfs_and_upload_to_drive(
         os.makedirs(local_images_dir, exist_ok=True)
         os.makedirs(local_pdfs_dir, exist_ok=True)
 
+        stats["estado"] = "Descargando imágenes necesarias para construir PDFs..."
+        update_ui(force=True)
+
         img_logs = download_images_for_rows(
             drive_service=drive_service,
             rows=rows_tail,
@@ -1018,31 +1058,63 @@ def generate_pdfs_and_upload_to_drive(
         )
 
         logs.extend(img_logs)
+        update_ui(force=True)
 
-        for _, chunk in chunker(rows_tail, chunk_size):
+        chunks = list(chunker(rows_tail, chunk_size))
+
+        for pdf_idx, (_, chunk) in enumerate(chunks, start=1):
             start_id = int(chunk[0]["id_mensaje"])
             end_id = int(chunk[-1]["id_mensaje"])
 
             pdf_name = f"{start_id}-{end_id}.pdf"
             local_pdf_path = os.path.join(local_pdfs_dir, pdf_name)
 
-            create_pdf_for_chunk(
-                chunk=chunk,
-                output_pdf_path=local_pdf_path,
-                local_images_dir=local_images_dir
-            )
+            stats["pdf_actual"] = pdf_name
+            stats["estado"] = f"Generando PDF {pdf_idx}/{num_pdfs}: {pdf_name}"
+            update_ui(force=True)
 
-            uploaded_pdf = upload_file_to_drive(
-                drive_service=drive_service,
-                local_file_path=local_pdf_path,
-                parent_folder_id=pdf_reports_folder_id,
-                drive_file_name=pdf_name,
-                mimetype="application/pdf"
-            )
+            try:
+                create_pdf_for_chunk(
+                    chunk=chunk,
+                    output_pdf_path=local_pdf_path,
+                    local_images_dir=local_images_dir
+                )
+            except Exception as e:
+                stats["errores"] += 1
+                add_log(f"[ERROR] No se pudo generar PDF {pdf_name}: {e}")
+                update_ui(force=True)
+                continue
 
-            uploaded_pdfs.append(uploaded_pdf)
+            stats["estado"] = f"Subiendo PDF {pdf_idx}/{num_pdfs}: {pdf_name}"
+            update_ui(force=True)
 
-            logs.append(f"[OK] PDF generado: {pdf_name}")
+            try:
+                uploaded_pdf = upload_file_to_drive(
+                    drive_service=drive_service,
+                    local_file_path=local_pdf_path,
+                    parent_folder_id=pdf_reports_folder_id,
+                    drive_file_name=pdf_name,
+                    mimetype="application/pdf"
+                )
+
+                uploaded_pdfs.append(uploaded_pdf)
+
+                stats["pdfs_generados"] += 1
+
+                add_log(f"[OK] PDF generado y guardado: {pdf_name}")
+                update_ui(force=True)
+
+            except Exception as e:
+                stats["errores"] += 1
+                add_log(f"[ERROR] No se pudo subir PDF {pdf_name}: {e}")
+                update_ui(force=True)
+                continue
+
+    stats["estado"] = "Generación de PDFs finalizada."
+    add_log(f"[INFO] PDFs generados correctamente: {stats['pdfs_generados']}/{stats['total_pdfs']}")
+    add_log(f"[INFO] Errores: {stats['errores']}")
+
+    update_ui(force=True)
 
     return uploaded_pdfs, logs
 
@@ -1354,13 +1426,72 @@ try:
         if df_messages_pdf.empty:
             st.error("La DB está vacía. Primero extrae imágenes.")
         else:
-            with st.spinner("Generando PDFs..."):
+            pdf_progress_bar = st.progress(0)
+            pdf_status_box = st.empty()
+
+            pdf_metric_cols = st.columns(5)
+            pdf_metric_total_imgs = pdf_metric_cols[0].empty()
+            pdf_metric_total_pdfs = pdf_metric_cols[1].empty()
+            pdf_metric_done = pdf_metric_cols[2].empty()
+            pdf_metric_errors = pdf_metric_cols[3].empty()
+            pdf_metric_time = pdf_metric_cols[4].empty()
+
+            pdf_current_box = st.empty()
+            pdf_log_box = st.empty()
+
+            last_pdf_render = {"time": 0}
+
+            def render_pdf_progress(stats, logs, force=False):
+                now = time.time()
+
+                if not force and (now - last_pdf_render["time"]) < 0.4:
+                    return
+
+                last_pdf_render["time"] = now
+
+                imagenes_a_procesar = int(stats.get("imagenes_a_procesar", 0))
+                total_pdfs = int(stats.get("total_pdfs", 0))
+                pdfs_generados = int(stats.get("pdfs_generados", 0))
+                errores = int(stats.get("errores", 0))
+                pdf_actual = stats.get("pdf_actual", "-")
+                estado = stats.get("estado", "Procesando PDFs...")
+                inicio = stats.get("inicio", now)
+
+                elapsed = max(now - inicio, 0)
+                elapsed_min = elapsed / 60
+
+                if total_pdfs > 0:
+                    progress_value = min(pdfs_generados / total_pdfs, 1.0)
+                else:
+                    progress_value = 0
+
+                pdf_progress_bar.progress(progress_value)
+
+                pdf_status_box.info(estado)
+
+                pdf_metric_total_imgs.metric("Imágenes a procesar", imagenes_a_procesar)
+                pdf_metric_total_pdfs.metric("PDFs totales", total_pdfs)
+                pdf_metric_done.metric("PDFs generados", pdfs_generados)
+                pdf_metric_errors.metric("Errores", errores)
+                pdf_metric_time.metric("Tiempo min", f"{elapsed_min:.1f}")
+
+                pdf_current_box.write(f"PDF actual: `{pdf_actual}`")
+
+                render_scrollable_logs(
+                    container=pdf_log_box,
+                    logs=logs,
+                    height=180,
+                    max_lines=120
+                )
+
+            with st.spinner("Generando PDFs. No cierres esta pestaña..."):
                 uploaded_pdfs, pdf_logs = generate_pdfs_and_upload_to_drive(
                     df_messages=df_messages_pdf,
                     last_old_id=int(last_old_id_pdf),
                     chunk_size=int(chunk_size_pdf),
                     drive_service=drive_service,
-                    pdf_reports_folder_id=pdf_reports_folder_id
+                    pdf_reports_folder_id=pdf_reports_folder_id,
+                    ui_callback=render_pdf_progress
                 )
 
             if uploaded_pdfs:
@@ -1369,13 +1500,20 @@ try:
                 st.success(f"{len(uploaded_pdfs)} PDF(s) generado(s) correctamente.")
 
                 st.write("PDFs generados:")
+
                 for name in pdf_names:
                     st.write(f"- {name}")
             else:
                 st.info("No se generaron PDFs nuevos.")
 
-            st.write("Logs PDFs:")
-            st.code("\n".join(pdf_logs))
+            st.write("Logs PDFs finales:")
+
+            render_scrollable_logs(
+                container=st,
+                logs=pdf_logs,
+                height=180,
+                max_lines=120
+            )
 
 except Exception as e:
     st.error("Ocurrió un error.")
