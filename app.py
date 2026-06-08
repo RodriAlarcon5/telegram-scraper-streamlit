@@ -2,9 +2,11 @@ import os
 import re
 import math
 import json
+import time
 import asyncio
 import tempfile
 from datetime import datetime, timezone
+from collections import deque
 
 import pandas as pd
 import streamlit as st
@@ -134,6 +136,42 @@ def get_google_services():
 
 
 # =========================================================
+# RETRY HELPERS
+# =========================================================
+
+def sleep_backoff(attempt, base_seconds=1.0, max_seconds=30.0):
+    delay = min(base_seconds * (2 ** attempt), max_seconds)
+    time.sleep(delay)
+
+
+def append_row_with_retries(ws, row, max_retries=5):
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            ws.append_row(row, value_input_option="USER_ENTERED")
+            return True
+        except Exception as e:
+            last_error = e
+            sleep_backoff(attempt)
+
+    raise last_error
+
+
+def execute_drive_request_with_retries(request_factory, max_retries=5):
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            return request_factory().execute()
+        except Exception as e:
+            last_error = e
+            sleep_backoff(attempt)
+
+    raise last_error
+
+
+# =========================================================
 # DRIVE HELPERS
 # =========================================================
 
@@ -145,10 +183,12 @@ def get_child_folder_id(drive_service, parent_folder_id, folder_name):
         f"and trashed = false"
     )
 
-    results = drive_service.files().list(
-        q=query,
-        fields="files(id, name)"
-    ).execute()
+    results = execute_drive_request_with_retries(
+        lambda: drive_service.files().list(
+            q=query,
+            fields="files(id, name)"
+        )
+    )
 
     folders = results.get("files", [])
 
@@ -167,6 +207,15 @@ def upload_file_to_drive(
     drive_file_name,
     mimetype
 ):
+    existing_file = find_drive_file_by_name(
+        drive_service=drive_service,
+        parent_folder_id=parent_folder_id,
+        file_name=drive_file_name
+    )
+
+    if existing_file:
+        return existing_file
+
     file_metadata = {
         "name": drive_file_name,
         "parents": [parent_folder_id]
@@ -178,11 +227,13 @@ def upload_file_to_drive(
         resumable=True
     )
 
-    uploaded_file = drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields="id, name, webViewLink"
-    ).execute()
+    uploaded_file = execute_drive_request_with_retries(
+        lambda: drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, name, webViewLink"
+        )
+    )
 
     return uploaded_file
 
@@ -207,10 +258,12 @@ def find_drive_file_by_name(drive_service, parent_folder_id, file_name):
         f"and trashed = false"
     )
 
-    results = drive_service.files().list(
-        q=query,
-        fields="files(id, name, webViewLink)"
-    ).execute()
+    results = execute_drive_request_with_retries(
+        lambda: drive_service.files().list(
+            q=query,
+            fields="files(id, name, webViewLink)"
+        )
+    )
 
     files = results.get("files", [])
 
@@ -228,17 +281,15 @@ def delete_drive_file_if_exists(drive_service, parent_folder_id, file_name):
     )
 
     if file_found:
-        drive_service.files().delete(fileId=file_found["id"]).execute()
+        execute_drive_request_with_retries(
+            lambda: drive_service.files().delete(fileId=file_found["id"])
+        )
         return True
 
     return False
 
 
 def parse_pdf_range(file_name):
-    """
-    Convierte nombres tipo '99605-100266.pdf' en (99605, 100266).
-    Si no cumple el formato, regresa None.
-    """
     match = re.match(r"^(\d+)-(\d+)\.pdf$", str(file_name).strip())
 
     if not match:
@@ -251,17 +302,10 @@ def parse_pdf_range(file_name):
 
 
 def ranges_overlap(a_start, a_end, b_start, b_end):
-    """
-    Evalúa si dos rangos [a_start, a_end] y [b_start, b_end] se empalman.
-    """
     return a_start <= b_end and b_start <= a_end
 
 
 def list_pdf_files_in_folder(drive_service, parent_folder_id):
-    """
-    Lista PDFs dentro de una carpeta de Drive.
-    Maneja paginación por si hay muchos archivos.
-    """
     files = []
     page_token = None
 
@@ -272,11 +316,13 @@ def list_pdf_files_in_folder(drive_service, parent_folder_id):
             f"and trashed = false"
         )
 
-        response = drive_service.files().list(
-            q=query,
-            fields="nextPageToken, files(id, name, webViewLink)",
-            pageToken=page_token
-        ).execute()
+        response = execute_drive_request_with_retries(
+            lambda: drive_service.files().list(
+                q=query,
+                fields="nextPageToken, files(id, name, webViewLink)",
+                pageToken=page_token
+            )
+        )
 
         files.extend(response.get("files", []))
         page_token = response.get("nextPageToken")
@@ -293,9 +339,6 @@ def delete_overlapping_pdfs(
     regen_start_id,
     regen_end_id
 ):
-    """
-    Borra PDFs existentes cuyo rango de IDs se empalme con el rango que se va a regenerar.
-    """
     deleted_files = []
     pdf_files = list_pdf_files_in_folder(drive_service, parent_folder_id)
 
@@ -314,7 +357,9 @@ def delete_overlapping_pdfs(
             regen_start_id,
             regen_end_id
         ):
-            drive_service.files().delete(fileId=file["id"]).execute()
+            execute_drive_request_with_retries(
+                lambda file_id=file["id"]: drive_service.files().delete(fileId=file_id)
+            )
             deleted_files.append(file_name)
 
     return deleted_files
@@ -352,13 +397,6 @@ def get_messages_df(sh):
         df = df[expected_cols]
 
     return df
-
-
-def append_messages_to_sheet(sh, rows):
-    ws_messages = sh.worksheet(MESSAGES_SHEET_NAME)
-
-    if rows:
-        ws_messages.append_rows(rows)
 
 
 # =========================================================
@@ -427,18 +465,41 @@ def get_telegram_client(api_id, api_hash):
     )
 
 
-async def extraer_telegram_a_drive(
+async def extraer_telegram_a_drive_streaming(
     api_id,
     api_hash,
     chat_id,
     drive_service,
+    sh,
     screenshots_folder_id,
     ids_existentes,
     min_id=None,
-    max_to_process=100000
+    max_to_process=100000,
+    ui_callback=None
 ):
-    registros_nuevos = []
-    logs = []
+    ws_messages = sh.worksheet(MESSAGES_SHEET_NAME)
+
+    log_buffer = deque(maxlen=250)
+
+    stats = {
+        "revisados": 0,
+        "procesados": 0,
+        "saltados": 0,
+        "errores": 0,
+        "ultimo_id": None,
+        "inicio": time.time(),
+        "estado": "Iniciando conexión con Telegram..."
+    }
+
+    def add_log(message):
+        log_buffer.append(message)
+
+    def update_ui(force=False):
+        if ui_callback:
+            ui_callback(stats.copy(), list(log_buffer), force=force)
+
+    add_log("[INFO] Iniciando extracción en modo streaming.")
+    update_ui(force=True)
 
     telegram_client = get_telegram_client(api_id, api_hash)
 
@@ -452,14 +513,24 @@ async def extraer_telegram_a_drive(
         if min_id is not None:
             iter_kwargs["min_id"] = int(min_id)
 
-        procesados = 0
-        revisados = 0
+        stats["estado"] = "Leyendo mensajes de Telegram..."
+        update_ui(force=True)
 
         async for msg in client.iter_messages(chat_id, **iter_kwargs):
-            revisados += 1
+            stats["revisados"] += 1
+            stats["ultimo_id"] = int(msg.id)
 
             if msg.id in ids_existentes:
+                stats["saltados"] += 1
+
+                if stats["revisados"] % 25 == 0:
+                    stats["estado"] = "Saltando mensajes ya existentes..."
+                    update_ui()
+
                 continue
+
+            if stats["procesados"] >= max_to_process:
+                break
 
             texto_original = (msg.text or "(Sin texto)").replace("\n", " ").strip()
 
@@ -468,20 +539,30 @@ async def extraer_telegram_a_drive(
 
             drv_phone, ciudad, app, categoria = parsear_texto(texto_original)
 
+            stats["estado"] = f"Descargando imagen msg_id={msg.id}..."
+            update_ui()
+
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_file_path = os.path.join(tmpdir, f"{msg.id}.jpg")
 
                 try:
                     downloaded_path = await msg.download_media(file=local_file_path)
                 except Exception as e:
-                    logs.append(f"[ERROR] No se pudo descargar msg_id={msg.id}: {e}")
+                    stats["errores"] += 1
+                    add_log(f"[ERROR] No se pudo descargar msg_id={msg.id}: {e}")
+                    update_ui(force=True)
                     continue
 
                 if downloaded_path is None or not os.path.exists(downloaded_path):
-                    logs.append(f"[WARN] No se encontró archivo descargado para msg_id={msg.id}")
+                    stats["errores"] += 1
+                    add_log(f"[WARN] No se encontró archivo descargado para msg_id={msg.id}")
+                    update_ui(force=True)
                     continue
 
                 drive_file_name = f"{msg.id}.jpg"
+
+                stats["estado"] = f"Subiendo imagen msg_id={msg.id}..."
+                update_ui()
 
                 try:
                     uploaded = upload_file_to_drive(
@@ -492,7 +573,9 @@ async def extraer_telegram_a_drive(
                         mimetype="image/jpeg"
                     )
                 except Exception as e:
-                    logs.append(f"[ERROR] No se pudo guardar msg_id={msg.id}: {e}")
+                    stats["errores"] += 1
+                    add_log(f"[ERROR] No se pudo guardar imagen msg_id={msg.id}: {e}")
+                    update_ui(force=True)
                     continue
 
             created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -510,21 +593,43 @@ async def extraer_telegram_a_drive(
                 created_at
             ]
 
-            registros_nuevos.append(registro)
+            stats["estado"] = f"Escribiendo en DB msg_id={msg.id}..."
+            update_ui()
 
-            logs.append(
-                f"[OK] msg_id={msg.id} | fecha={fecha_str} | city={ciudad} | app={app} | category={categoria}"
+            try:
+                append_row_with_retries(ws_messages, registro)
+            except Exception as e:
+                stats["errores"] += 1
+                add_log(f"[ERROR] Imagen subida, pero no se pudo escribir en DB msg_id={msg.id}: {e}")
+                update_ui(force=True)
+                continue
+
+            ids_existentes.add(int(msg.id))
+            stats["procesados"] += 1
+
+            add_log(
+                f"[OK] {stats['procesados']}/{max_to_process} | "
+                f"msg_id={msg.id} | fecha={fecha_str} | city={ciudad} | app={app} | category={categoria}"
             )
 
-            procesados += 1
+            stats["estado"] = f"Procesado msg_id={msg.id}"
 
-            if procesados >= max_to_process:
+            update_ui(force=True)
+
+            await asyncio.sleep(0)
+
+            if stats["procesados"] >= max_to_process:
                 break
 
-        logs.append(f"Revisados: {revisados}")
-        logs.append(f"Procesados nuevos: {procesados}")
+    stats["estado"] = "Extracción finalizada."
+    add_log(f"[INFO] Revisados: {stats['revisados']}")
+    add_log(f"[INFO] Saltados por duplicado: {stats['saltados']}")
+    add_log(f"[INFO] Procesados nuevos: {stats['procesados']}")
+    add_log(f"[INFO] Errores: {stats['errores']}")
 
-    return registros_nuevos, logs
+    update_ui(force=True)
+
+    return stats, list(log_buffer)
 
 
 # =========================================================
@@ -881,8 +986,8 @@ def generate_pdfs_and_upload_to_drive(
 if "last_extraction_logs" not in st.session_state:
     st.session_state["last_extraction_logs"] = None
 
-if "last_extraction_count" not in st.session_state:
-    st.session_state["last_extraction_count"] = None
+if "last_extraction_stats" not in st.session_state:
+    st.session_state["last_extraction_stats"] = None
 
 if "show_extraction_success" not in st.session_state:
     st.session_state["show_extraction_success"] = False
@@ -968,7 +1073,7 @@ try:
 
     max_to_process = st.sidebar.number_input(
         "Máximo de imágenes a procesar",
-        value=5,
+        value=100,
         min_value=1,
         max_value=100000,
         step=1
@@ -1008,71 +1113,122 @@ try:
     st.divider()
 
     # =====================================================
-    # EXTRACCIÓN TELEGRAM
+    # EXTRACCIÓN TELEGRAM STREAMING
     # =====================================================
 
     st.subheader("1. Extraer imágenes de Telegram")
 
     st.write(
-        "Este proceso descargará fotos nuevas desde Telegram, "
-        "actualizará la DB y guardará la metadata correspondiente."
+        "Este proceso descarga fotos nuevas desde Telegram, "
+        "actualiza la DB imagen por imagen y muestra el avance en tiempo real."
     )
 
     if st.button("Extraer imágenes nuevas", type="primary"):
         if not api_hash:
             st.error("Primero configura TELEGRAM_API_HASH en secrets o pégalo manualmente.")
         else:
-            with st.spinner("Extrayendo imágenes de Telegram..."):
-                ids_existentes = set()
+            ids_existentes = set()
 
-                if not df_messages.empty and "id_mensaje" in df_messages.columns:
-                    ids_existentes = set(
-                        pd.to_numeric(df_messages["id_mensaje"], errors="coerce")
-                        .dropna()
-                        .astype(int)
-                        .tolist()
-                    )
+            if not df_messages.empty and "id_mensaje" in df_messages.columns:
+                ids_existentes = set(
+                    pd.to_numeric(df_messages["id_mensaje"], errors="coerce")
+                    .dropna()
+                    .astype(int)
+                    .tolist()
+                )
 
-                registros_nuevos, logs = asyncio.run(
-                    extraer_telegram_a_drive(
+            progress_bar = st.progress(0)
+            status_box = st.empty()
+
+            metric_cols = st.columns(5)
+            metric_revisados = metric_cols[0].empty()
+            metric_procesados = metric_cols[1].empty()
+            metric_saltados = metric_cols[2].empty()
+            metric_errores = metric_cols[3].empty()
+            metric_tiempo = metric_cols[4].empty()
+
+            log_box = st.empty()
+
+            last_render = {"time": 0}
+
+            def render_progress(stats, logs, force=False):
+                now = time.time()
+
+                if not force and (now - last_render["time"]) < 0.4:
+                    return
+
+                last_render["time"] = now
+
+                procesados = int(stats.get("procesados", 0))
+                revisados = int(stats.get("revisados", 0))
+                saltados = int(stats.get("saltados", 0))
+                errores = int(stats.get("errores", 0))
+                estado = stats.get("estado", "Procesando...")
+                inicio = stats.get("inicio", now)
+
+                elapsed = max(now - inicio, 0)
+                elapsed_min = elapsed / 60
+
+                progress_value = min(procesados / int(max_to_process), 1.0)
+
+                progress_bar.progress(progress_value)
+
+                status_box.info(estado)
+
+                metric_revisados.metric("Revisados", revisados)
+                metric_procesados.metric("Guardados", procesados)
+                metric_saltados.metric("Duplicados saltados", saltados)
+                metric_errores.metric("Errores", errores)
+                metric_tiempo.metric("Tiempo min", f"{elapsed_min:.1f}")
+
+                log_box.code("\n".join(logs[-120:]) if logs else "Sin logs todavía.")
+
+            with st.spinner("Extrayendo imágenes. No cierres esta pestaña..."):
+                stats, logs = asyncio.run(
+                    extraer_telegram_a_drive_streaming(
                         api_id=int(api_id),
                         api_hash=api_hash,
                         chat_id=int(chat_id),
                         drive_service=drive_service,
+                        sh=sh,
                         screenshots_folder_id=screenshots_folder_id,
                         ids_existentes=ids_existentes,
                         min_id=int(last_processed_id) if last_processed_id > 0 else None,
-                        max_to_process=int(max_to_process)
+                        max_to_process=int(max_to_process),
+                        ui_callback=render_progress
                     )
                 )
 
-                if registros_nuevos:
-                    append_messages_to_sheet(sh, registros_nuevos)
+            st.session_state["last_extraction_stats"] = stats
+            st.session_state["last_extraction_logs"] = logs
+            st.session_state["show_extraction_success"] = True
 
-                st.session_state["last_extraction_count"] = len(registros_nuevos)
-                st.session_state["last_extraction_logs"] = logs
-                st.session_state["show_extraction_success"] = True
+            if stats["procesados"] > 0:
+                st.success(
+                    f"Extracción finalizada. {stats['procesados']} registros nuevos guardados."
+                )
+            else:
+                st.info("Extracción finalizada. No se encontraron registros nuevos.")
 
-                st.rerun()
+            st.info("La DB fue actualizada durante el proceso. Puedes generar PDFs o recargar la página para ver el total actualizado arriba.")
 
     if st.session_state["show_extraction_success"]:
-        count = st.session_state["last_extraction_count"]
+        stats = st.session_state["last_extraction_stats"]
         logs = st.session_state["last_extraction_logs"]
 
-        if count and count > 0:
-            st.success(
-                f"{count} registros nuevos guardados. "
-                "La DB ya fue recargada automáticamente."
-            )
-        else:
-            st.info(
-                "No se encontraron registros nuevos para guardar. "
-                "La DB ya fue recargada automáticamente."
-            )
+        if stats:
+            st.write("Último resumen de extracción:")
+            st.json({
+                "revisados": stats.get("revisados"),
+                "procesados": stats.get("procesados"),
+                "saltados": stats.get("saltados"),
+                "errores": stats.get("errores"),
+                "ultimo_id": stats.get("ultimo_id")
+            })
 
         if logs:
-            st.write("Logs:")
-            st.code("\n".join(logs))
+            st.write("Logs finales:")
+            st.code("\n".join(logs[-120:]))
 
     st.divider()
 
@@ -1105,12 +1261,14 @@ try:
         st.metric("Imágenes nuevas directas", new_rows_count)
 
     if st.button("Generar PDFs", type="primary"):
-        if df_messages.empty:
+        df_messages_pdf = get_messages_df(sh)
+
+        if df_messages_pdf.empty:
             st.error("La DB está vacía. Primero extrae imágenes.")
         else:
             with st.spinner("Generando PDFs..."):
                 uploaded_pdfs, pdf_logs = generate_pdfs_and_upload_to_drive(
-                    df_messages=df_messages,
+                    df_messages=df_messages_pdf,
                     last_old_id=int(last_old_id_pdf),
                     chunk_size=int(chunk_size_pdf),
                     drive_service=drive_service,
