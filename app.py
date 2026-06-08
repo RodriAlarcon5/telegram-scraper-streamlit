@@ -77,6 +77,8 @@ PDF_REPORTS_FOLDER_NAME = "pdf_reports"
 
 LOCAL_SESSION_NAME = "scraper_rodrigo"
 
+CHAT_ID_FIXED = int(get_secret_value("TELEGRAM_CHAT_ID", -1002642749020))
+
 CHUNK_SIZE = 200
 
 
@@ -1088,39 +1090,6 @@ try:
 
     df_messages = get_messages_df(sh)
 
-    # =====================================================
-    # SIDEBAR
-    # =====================================================
-
-    st.sidebar.header("Configuración Telegram")
-
-    default_api_id = int(get_secret_value("TELEGRAM_API_ID", 21360469))
-    default_api_hash = get_secret_value("TELEGRAM_API_HASH", "")
-
-    api_id = st.sidebar.number_input(
-        "API ID",
-        value=default_api_id,
-        step=1
-    )
-
-    if default_api_hash:
-        api_hash = default_api_hash
-        st.sidebar.success("API Hash cargado desde secrets.")
-    else:
-        api_hash = st.sidebar.text_input(
-            "API Hash",
-            type="password",
-            help="Pega aquí tu API Hash de Telegram. No se muestra en pantalla."
-        )
-
-    chat_id = st.sidebar.number_input(
-        "Chat ID",
-        value=-1002642749020,
-        step=1
-    )
-
-    st.sidebar.header("Extracción")
-
     if df_messages.empty:
         suggested_last_id = 0
     else:
@@ -1129,6 +1098,33 @@ try:
             .dropna()
             .max()
         )
+
+    # =====================================================
+    # SIDEBAR
+    # =====================================================
+
+    st.sidebar.header("Configuración Telegram")
+
+    api_id = int(get_secret_value("TELEGRAM_API_ID", 21360469))
+    api_hash = get_secret_value("TELEGRAM_API_HASH", "")
+    chat_id = int(CHAT_ID_FIXED)
+
+    st.sidebar.write("API ID")
+    st.sidebar.code(str(api_id))
+
+    if api_hash:
+        st.sidebar.success("API Hash cargado desde secrets.")
+    else:
+        api_hash = st.sidebar.text_input(
+            "API Hash",
+            type="password",
+            help="Pega aquí tu API Hash de Telegram. No se muestra en pantalla."
+        )
+
+    st.sidebar.write("Chat ID")
+    st.sidebar.code(str(chat_id))
+
+    st.sidebar.header("Extracción")
 
     last_processed_id = st.sidebar.number_input(
         "last_processed_id",
@@ -1139,9 +1135,9 @@ try:
 
     max_to_process = st.sidebar.number_input(
         "Máximo de imágenes a procesar",
-        value=100,
+        value=350,
         min_value=1,
-        max_value=100000,
+        max_value=350,
         step=1
     )
 
@@ -1168,7 +1164,13 @@ try:
 
     st.subheader("Base de datos")
 
-    st.metric("Total registros en DB", len(df_messages))
+    metric_db_col_1, metric_db_col_2 = st.columns(2)
+
+    with metric_db_col_1:
+        st.metric("Total registros en DB", len(df_messages))
+
+    with metric_db_col_2:
+        st.metric("ID mensaje más grande", suggested_last_id)
 
     if not df_messages.empty:
         st.write("Últimos registros:")
