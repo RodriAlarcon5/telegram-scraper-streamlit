@@ -1181,7 +1181,12 @@ try:
                 metric_errores.metric("Errores", errores)
                 metric_tiempo.metric("Tiempo min", f"{elapsed_min:.1f}")
 
-                log_box.code("\n".join(logs[-120:]) if logs else "Sin logs todavía.")
+                log_box.text_area(
+                    "Logs en vivo",
+                    value="\n".join(logs[-120:]) if logs else "Sin logs todavía.",
+                    height=180,
+                    disabled=True
+                )
 
             with st.spinner("Extrayendo imágenes. No cierres esta pestaña..."):
                 stats, logs = asyncio.run(
@@ -1210,7 +1215,10 @@ try:
             else:
                 st.info("Extracción finalizada. No se encontraron registros nuevos.")
 
-            st.info("La DB fue actualizada durante el proceso. Puedes generar PDFs o recargar la página para ver el total actualizado arriba.")
+            st.info(
+                "La DB fue actualizada durante el proceso. "
+                "Puedes generar PDFs o recargar la página para ver el total actualizado arriba."
+            )
 
     if st.session_state["show_extraction_success"]:
         stats = st.session_state["last_extraction_stats"]
@@ -1218,17 +1226,24 @@ try:
 
         if stats:
             st.write("Último resumen de extracción:")
-            st.json({
-                "revisados": stats.get("revisados"),
-                "procesados": stats.get("procesados"),
-                "saltados": stats.get("saltados"),
-                "errores": stats.get("errores"),
-                "ultimo_id": stats.get("ultimo_id")
-            })
+
+            resumen_cols = st.columns(5)
+
+            resumen_cols[0].metric("Revisados", stats.get("revisados", 0))
+            resumen_cols[1].metric("Guardados", stats.get("procesados", 0))
+            resumen_cols[2].metric("Duplicados saltados", stats.get("saltados", 0))
+            resumen_cols[3].metric("Errores", stats.get("errores", 0))
+            resumen_cols[4].metric("Último ID", stats.get("ultimo_id", "-"))
 
         if logs:
             st.write("Logs finales:")
-            st.code("\n".join(logs[-120:]))
+
+            st.text_area(
+                "Últimos logs de extracción",
+                value="\n".join(logs[-120:]),
+                height=180,
+                disabled=True
+            )
 
     st.divider()
 
